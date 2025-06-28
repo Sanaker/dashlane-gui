@@ -111,6 +111,12 @@ To create a standalone executable (e.g., `.exe` for Windows), use PyInstaller:
 Feel free to open issues for bug reports or feature requests. Pull requests are also welcome!
 
 ---
+## TODO-List
+
+* option to add / remove logins
+* see Secure notes, Payments, Personal info, ID's
+* See Collections
+---
 
 ## License
 
