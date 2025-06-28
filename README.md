@@ -114,8 +114,6 @@ Feel free to open issues for bug reports or feature requests. Pull requests are 
 
 ## License
 
-## License
-
 MIT License
 
 Copyright (c) 2025 Sanaker
