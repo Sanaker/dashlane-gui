@@ -18,12 +18,13 @@ CONFIG_FILE = 'config.ini'
 LOG_FILE = 'dashlane_gui.log'
 MAX_SEARCH_HISTORY = 10 # This is a constant for the max history length, not exposed for editing
 
-logging.basicConfig(level=logging.DEBUG,
+# Configure logging to write to a file and also to the console (stderr)
+logging.basicConfig(level=logging.DEBUG, # Log all messages at DEBUG level and above
                     format='%(asctime)s - %(threadName)s - %(levelname)s - %(message)s',
                     filename=LOG_FILE,
-                    filemode='w')
+                    filemode='a') # Use 'a' for append mode, 'w' for overwrite
 console_handler = logging.StreamHandler(sys.stderr)
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.INFO) # Only show INFO level messages and above on console
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 logging.getLogger().addHandler(console_handler)
@@ -79,10 +80,19 @@ DL_COLORS = {
 
 # --- HELPER FUNCTIONS ---
 
-def copy_to_clipboard(text, button_widget=None, original_text=None):
+def copy_to_clipboard(text, button_widget=None, original_text=None, is_sensitive=True):
+    """
+    Copies text to clipboard and logs a message.
+    'is_sensitive' flag controls whether the actual text is logged.
+    """
     root.clipboard_clear()
     root.clipboard_append(text)
-    logging.info(f"Copied text to clipboard: '{text[:50]}...'")
+
+    if is_sensitive:
+        logging.info("Copied sensitive data to clipboard (password/login).")
+    else:
+        logging.info(f"Copied text to clipboard: '{text[:50]}{'...' if len(text) > 50 else ''}'")
+
 
     if button_widget and original_text:
         button_widget.config(text="Copied!", state=tk.DISABLED)
@@ -189,15 +199,16 @@ def display_password_details_window(item_title, item_login, password):
     button_frame.grid(row=3, column=0, columnspan=3, pady=15)
 
     btn_copy_password = ttk.Button(button_frame, text="Copy Password")
-    btn_copy_password.config(command=lambda: copy_to_clipboard(password, btn_copy_password, "Copy Password"))
+    # Pass is_sensitive=True for password and login copies
+    btn_copy_password.config(command=lambda: copy_to_clipboard(password, btn_copy_password, "Copy Password", is_sensitive=True))
     btn_copy_password.pack(side=tk.LEFT, padx=5)
 
     btn_copy_login = ttk.Button(button_frame, text="Copy Login")
-    btn_copy_login.config(command=lambda: copy_to_clipboard(item_login, btn_copy_login, "Copy Login"))
+    btn_copy_login.config(command=lambda: copy_to_clipboard(item_login, btn_copy_login, "Copy Login", is_sensitive=True))
     btn_copy_login.pack(side=tk.LEFT, padx=5)
 
     btn_copy_both = ttk.Button(button_frame, text="Copy Both")
-    btn_copy_both.config(command=lambda: copy_to_clipboard(f"{item_login}:{password}", btn_copy_both, "Copy Both"))
+    btn_copy_both.config(command=lambda: copy_to_clipboard(f"{item_login}:{password}", btn_copy_both, "Copy Both", is_sensitive=True))
     btn_copy_both.pack(side=tk.LEFT, padx=5)
 
     ttk.Button(content_frame, text="Close", command=details_window.destroy).grid(row=4, column=0, columnspan=3, pady=5)
@@ -206,7 +217,8 @@ def display_password_details_window(item_title, item_login, password):
     logging.info(f"Opened password details window for '{item_title}'.")
     update_status("Password details displayed.", 'info')
 
-    copy_to_clipboard(password)
+    # Automatically copy password on window open
+    copy_to_clipboard(password, is_sensitive=True)
     start_clipboard_countdown()
 
     details_window.bind("<Destroy>", lambda e: btn_view_details.config(state=tk.NORMAL))
@@ -381,8 +393,9 @@ def run_dcli_command_and_populate_treeview(search_term=""):
     if search_term:
         command.append(search_term)
     else:
+        # Broad filters to attempt to load all items when no search term is provided
         broad_filters = list(string.ascii_lowercase) + list(string.digits)
-        broad_filters.extend(['æ', 'ø', 'å']) # Add some common Nordic characters for broad filtering
+        broad_filters.extend(['æ', 'ø', 'å', 'é', 'à', 'ç']) # Add some common European characters for broader filtering
         command.extend(broad_filters)
         
     command.extend(["--output", "json"])
@@ -398,11 +411,14 @@ def run_dcli_command_and_populate_treeview(search_term=""):
         )
         stdout_data, stderr_data = process.communicate()
 
-        logging.debug(f"dcli STDOUT (command: {' '.join(command)}):\n{stdout_data}")
-        logging.debug(f"dcli STDERR (command: {' '.join(command)}):\n{stderr_data}")
+        # --- MODIFIED LOGGING HERE ---
+        # Log the command and its exit code, but NOT the full STDOUT if it's a password list command
+        logging.debug(f"dcli command executed: {' '.join(command)}")
         logging.info(f"dcli command Exit Code ({' '.join(command)}): {process.returncode}")
 
+        # Only log stderr_data if there was an actual error (non-zero exit code)
         if process.returncode != 0:
+            logging.error(f"dcli STDERR (command: {' '.join(command)}):\n{stderr_data.strip()}")
             error_message = f"dcli command failed with exit code {process.returncode}:\n{stderr_data.strip()}"
             if "authentication required" in stderr_data.lower() or "not logged in" in stderr_data.lower():
                 root.after(0, lambda: handle_error_in_thread(
@@ -421,20 +437,37 @@ def run_dcli_command_and_populate_treeview(search_term=""):
             else:
                 root.after(0, lambda: handle_error_in_thread("dcli Error", error_message))
             return
+        # --- END MODIFIED LOGGING ---
 
         try:
             items = json.loads(stdout_data)
             
-            unique_items = {item['id']: item for item in items}.values()
-            unique_items_list = list(unique_items)
+            # Use a dictionary to filter out duplicates based on 'id' if present, or title/login as fallback
+            # Some items might not have 'id', so a combined key is safer for uniqueness
+            unique_items_map = {}
+            for item in items:
+                item_id = item.get('id')
+                if item_id:
+                    unique_items_map[item_id] = item
+                else:
+                    # Fallback for items without an 'id' (e.g., Secure Notes, Personal Info)
+                    unique_key = (item.get('title', ''), item.get('login', ''), item.get('note', ''))
+                    unique_items_map[unique_key] = item
+            
+            unique_items_list = list(unique_items_map.values())
 
-            logging.info(f"Command '{' '.join(command)}' returned {len(unique_items_list)} unique items.")
+            logging.info(f"Command '{' '.join(command)}' successfully returned {len(unique_items_list)} unique items (output not logged).")
             
             root.after(0, lambda: populate_treeview(unique_items_list))
             root.after(0, lambda: update_status(f"Loaded {len(unique_items_list)} items. Ready.", 'info'))
             
         except json.JSONDecodeError as e:
-            error_message = f"dcli command did not return valid JSON. Error: {e}\nOutput:\n{stdout_data.strip()}\nError:\n{stderr_data.strip()}"
+            # For JSON decode errors, it's helpful to log the problematic output for debugging,
+            # but still warn about sensitive data if it's a password list command.
+            output_snippet = stdout_data.strip()[:500] + "..." if len(stdout_data.strip()) > 500 else stdout_data.strip()
+            sensitive_warning = " (WARNING: This output may contain sensitive data and is being logged for debugging JSON errors.)" if "password list" in " ".join(command) else ""
+            error_message = f"dcli command did not return valid JSON. Error: {e}\nOutput (snippet){sensitive_warning}:\n{output_snippet}\nError:\n{stderr_data.strip()}"
+            logging.error(error_message) # Log the error message with snippet
             root.after(0, lambda: handle_error_in_thread("JSON Decode Error", error_message))
         except Exception as json_e:
             error_message = f"Error processing dcli JSON output: {str(json_e)}\nOutput:\n{stdout_data.strip()}"
@@ -638,7 +671,8 @@ root.title("Dashlane CLI GUI")
 
 # Set the window icon
 try:
-    icon_path = os.path.join(os.path.dirname(__file__), 'bilde.png')
+    # Use os.path.abspath to ensure the path is always absolute
+    icon_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'bilde.png')
     if os.path.exists(icon_path):
         root.iconphoto(False, tk.PhotoImage(file=icon_path)) 
         logging.info(f"Application icon set from {icon_path}")
